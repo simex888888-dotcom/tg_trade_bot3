@@ -68,7 +68,10 @@ def px(val: float, size: int) -> int:
 # BOT
 # =====================================================
 
-TOKEN = "8275118382:AAEf0EYGmGPgKhWHQU1CKFQieSXhhX7QN34"
+TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN, timeout=60)
 dp = Dispatcher(storage=MemoryStorage())
