@@ -15,7 +15,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 from PIL import Image, ImageDraw, ImageFont
 
 from configs.fonts import FONTS
@@ -23,7 +22,6 @@ from configs.layout import LAYOUT, BYBIT_CUSTOM_LAYOUT
 from utils.draw_text import draw_text
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 
 # =====================================================
 # FSM
@@ -36,7 +34,7 @@ class CustomExchange(StatesGroup):
     entry = State()
     exit_price = State()
     leverage = State()
-    referral = State()      # реферальный код
+    referral = State()  # реферальный код
     datetime_str = State()  # дата и время
 
 
@@ -49,6 +47,10 @@ class TradeForm(StatesGroup):
     amount = State()
     deposit = State()
     leverage = State()
+
+
+class MarathonStatesGroup(StatesGroup):
+    start_deposit = State()
 
 
 BASE_H = 467
@@ -66,13 +68,17 @@ def px(val: float, size: int) -> int:
 # BOT
 # =====================================================
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+TOKEN = "8275118382:AAEf0EYGmGPgKhWHQU1CKFQieSXhhX7QN34"
 
 bot = Bot(token=TOKEN, timeout=60)
 dp = Dispatcher(storage=MemoryStorage())
+
+# =====================================================
+# МАРАФОН (в памяти)
+# =====================================================
+
+# user_id -> {"start": float, "balance": float}
+MARATHON: dict[int, dict[str, float]] = {}
 
 # =====================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -88,6 +94,7 @@ async def safe_delete_message(message: Message) -> None:
 def _cleanup_old_files(directory: str, prefix: str, max_age_seconds: int = 3600) -> None:
     """Удаляет временные файлы старше max_age_seconds секунд."""
     import time
+
     try:
         now = time.time()
         for fname in os.listdir(directory):
@@ -169,6 +176,7 @@ async def start(message: Message):
     kb.button(text="📊 BingX", callback_data="exchange_bingx")
     kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
     kb.button(text="🎨 Кастом BingX", callback_data="custom_bingx")
+    kb.button(text="🏁 Марафон", callback_data="marathon:menu")
     kb.adjust(1)
     await message.answer("Выбери режим:", reply_markup=kb.as_markup())
 
@@ -245,10 +253,9 @@ async def test_bingx(message: Message):
     path = generate_trade_image(fake_data, percent, pnl, pnl_usdt)
     await message.answer_photo(FSInputFile(path))
 
-    
+
 @dp.message(Command("test_bybit_custom"))
 async def test_bybit_custom(message: Message):
-    # фиксированные тестовые данные
     entry = 0.1068
     exit_price = 0.1092
     leverage_str = "50x"
@@ -304,6 +311,7 @@ async def test_bingx_custom(message: Message):
     path = generate_custom_bingx_image(image_data)
     await message.answer_photo(FSInputFile(path))
 
+
 @dp.message(Command("test_all"))
 async def test_all(message: Message):
     text = (
@@ -352,16 +360,16 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
-    pnl_usdt, margin_pos, percent = calculate_pnl_linear(
-    entry,
-    mark,
-    qty,
-    side,
-    leverage,
-)
-    # percent — PnL% позиции, pnl_usdt — сам PnL в USDT
-    pnl = percent
 
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(
+        entry,
+        mark,
+        qty,
+        side,
+        leverage,
+    )
+
+    pnl = percent
     liquidation = calculate_liquidation(entry, leverage, side)
 
     data = {
@@ -380,6 +388,23 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
 
     path = generate_trade_image(data, percent, pnl, pnl_usdt)
     await message.answer_photo(FSInputFile(path))
+
+    # === МАРАФОН: обновление после тестовой сделки ===
+    user_id = message.from_user.id
+    marathon = MARATHON.get(user_id)
+    if marathon is not None:
+        marathon["balance"] += pnl_usdt
+        start = marathon["start"]
+        balance = marathon["balance"]
+        pnl_total = balance - start
+        pnl_percent_total = (pnl_total / start * 100) if start else 0.0
+
+        await message.answer(
+            "🏁 Марафон\n"
+            f"Старт: {start:.2f} USDT\n"
+            f"Текущий баланс: {balance:.2f} USDT\n"
+            f"Итог: {pnl_total:+.2f} USDT ({pnl_percent_total:+.2f}%)"
+        )
 
 
 # ===== Кастом Bybit =====
@@ -438,20 +463,114 @@ async def _run_custom_test(message: Message, exchange: str, side: str):
 
 
 # =====================================================
+# МАРАФОН: меню и ввод депозита
+# =====================================================
+
+@dp.callback_query(F.data == "marathon:menu")
+async def marathon_menu(call: CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    marathon = MARATHON.get(user_id)
+
+    if marathon is None:
+        text = (
+            "Марафон ещё не запущен.\n\n"
+            "Отправь стартовый депозит (например, 100)."
+        )
+        await call.message.answer(text)
+        await state.set_state(MarathonStatesGroup.start_deposit)
+    else:
+        start = marathon["start"]
+        balance = marathon["balance"]
+        pnl_total = balance - start
+        pnl_percent_total = (pnl_total / start * 100) if start else 0.0
+
+        text = (
+            "🏁 Марафон\n"
+            f"Старт: {start:.2f} USDT\n"
+            f"Текущий баланс: {balance:.2f} USDT\n"
+            f"Итог: {pnl_total:+.2f} USDT ({pnl_percent_total:+.2f}%)"
+        )
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🚀 Сделка в марафоне", callback_data="marathon:start")
+        kb.button(text="🛑 Выключить марафон", callback_data="marathon:stop")
+        kb.adjust(1)
+        await call.message.answer(text, reply_markup=kb.as_markup())
+
+    await call.answer()
+
+
+@dp.message(MarathonStatesGroup.start_deposit)
+async def marathon_set_start(message: Message, state: FSMContext):
+    try:
+        start = float(message.text.replace(",", "."))
+        if start <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи положительное число, например: 100")
+        return
+
+    user_id = message.from_user.id
+    MARATHON[user_id] = {"start": start, "balance": start}
+    await state.clear()
+
+    await message.answer(
+        "Марафон запущен!\n\n"
+        f"Стартовый депозит: {start:.2f} USDT.\n"
+        "Теперь сделки в марафоне будут считать результат от этого депозита.\n"
+        "Сейчас выбери биржу для первой сделки в марафоне."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Bybit", callback_data="exchange_bybit")
+    kb.button(text="📊 BingX", callback_data="exchange_bingx")
+    kb.adjust(1)
+    await message.answer("Выбери биржу для сделки в марафоне:", reply_markup=kb.as_markup())
+
+
+@dp.callback_query(F.data == "marathon:start")
+async def marathon_start(call: CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    if user_id not in MARATHON:
+        await call.message.answer("Сначала запусти марафон и задай стартовый депозит через 🏁 Марафон.")
+        await call.answer()
+        return
+
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Bybit", callback_data="exchange_bybit")
+    kb.button(text="📊 BingX", callback_data="exchange_bingx")
+    kb.adjust(1)
+    await call.message.answer("Выбери биржу для сделки в марафоне:", reply_markup=kb.as_markup())
+    await call.answer()
+
+
+@dp.callback_query(F.data == "marathon:stop")
+async def marathon_stop(call: CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    if user_id in MARATHON:
+        del MARATHON[user_id]
+
+    await state.clear()
+    await call.message.answer("Марафон выключен. Теперь сделки считаются без марафона.")
+    await call.answer()
+
+
+# =====================================================
 # НАВИГАЦИЯ TRADEFORM
 # =====================================================
 
 @dp.callback_query(lambda c: c.data == "restart")
 async def restart(call: CallbackQuery, state: FSMContext):
     await state.clear()
-
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Bybit", callback_data="exchange_bybit")
     kb.button(text="📊 BingX", callback_data="exchange_bingx")
     kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
     kb.button(text="🎨 Кастом BingX", callback_data="custom_bingx")
+    kb.button(text="🏁 Марафон", callback_data="marathon:menu")
+    kb.button(text="🚀 Сделка в марафоне", callback_data="marathon:start")
     kb.adjust(1)
-
     await call.message.answer("Выбери режим:", reply_markup=kb.as_markup())
     await call.answer()
 
@@ -477,15 +596,14 @@ async def go_back(call: CallbackQuery, state: FSMContext):
         await show_step(call.message, state, text, kb)
         await state.set_state(st)
     else:
-        # Если не нашли шаг — возвращаем в начало
         kb = InlineKeyboardBuilder()
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
         kb.button(text="🎨 Кастом BingX", callback_data="custom_bingx")
+        kb.button(text="🏁 Марафон", callback_data="marathon:menu")
         kb.adjust(1)
         await call.message.answer("Выбери режим:", reply_markup=kb.as_markup())
-
     await call.answer()
 
 
@@ -512,6 +630,7 @@ async def get_symbol(message: Message, state: FSMContext):
         price_precision=precision,
         prev_state=TradeForm.symbol,
     )
+
     await safe_delete_message(message)
     await show_step(message, state, "Выбери направление 👇", side_kb)
     await state.set_state(TradeForm.side)
@@ -553,8 +672,21 @@ async def get_amount(message: Message, state: FSMContext):
     value = await parse_float(message)
     if value is None:
         return
+
     await state.update_data(amount=value, prev_state=TradeForm.amount)
     await safe_delete_message(message)
+
+    user_id = message.from_user.id
+    marathon = MARATHON.get(user_id)
+    if marathon is not None:
+        await state.update_data(
+            deposit=marathon["balance"],
+            prev_state=TradeForm.deposit,
+        )
+        await show_step(message, state, "Введите плечо (например 10)", back_kb)
+        await state.set_state(TradeForm.leverage)
+        return
+
     await show_step(message, state, "Какой депозит? (USDT)", back_kb)
     await state.set_state(TradeForm.deposit)
 
@@ -564,6 +696,7 @@ async def get_deposit(message: Message, state: FSMContext):
     value = await parse_float(message)
     if value is None:
         return
+
     await state.update_data(deposit=value, prev_state=TradeForm.deposit)
     await safe_delete_message(message)
     await show_step(message, state, "Введите плечо (например 10)", back_kb)
@@ -583,6 +716,11 @@ async def get_leverage(message: Message, state: FSMContext):
     await safe_delete_message(message)
     data = await state.get_data()
 
+    user_id = message.from_user.id
+    marathon = MARATHON.get(user_id)
+    if marathon is not None:
+        data["deposit"] = marathon["balance"]
+
     qty = calculate_qty(
         data["exchange"],
         data["amount"],
@@ -595,28 +733,42 @@ async def get_leverage(message: Message, state: FSMContext):
         leverage,
     )
     pnl_usdt, margin_pos, percent = calculate_pnl_linear(
-    data["entry"],
-    data["mark"],
-    qty,
-    data["side"],
-    leverage,
+        data["entry"],
+        data["mark"],
+        qty,
+        data["side"],
+        leverage,
     )
-    pnl = percent
 
+    pnl = percent
     liquidation = calculate_liquidation(data["entry"], leverage, data["side"])
 
     data.update(
-        {
-            "leverage": leverage,
-            "qty": qty,
-            "liquidation": liquidation,
-            "cost": cost,
-        }
+        leverage=leverage,
+        qty=qty,
+        liquidation=liquidation,
+        cost=cost,
     )
 
     path = generate_trade_image(data, percent, pnl, pnl_usdt)
     await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+
+    if marathon is not None:
+        marathon["balance"] += pnl_usdt
+        start = marathon["start"]
+        balance = marathon["balance"]
+        pnl_total = balance - start
+        pnl_percent_total = (pnl_total / start * 100) if start else 0.0
+
+        await message.answer(
+            "🏁 Марафон\n"
+            f"Старт: {start:.2f} USDT\n"
+            f"Текущий баланс: {balance:.2f} USDT\n"
+            f"Итог: {pnl_total:+.2f} USDT ({pnl_percent_total:+.2f}%)"
+        )
+
     await state.clear()
+
 
 # =====================================================
 # API: цены и точность
@@ -715,9 +867,7 @@ async def get_mark_from_exchange(call: CallbackQuery, state: FSMContext):
 # =====================================================
 
 def calculate_qty(exchange: str, amount: float, entry: float, leverage: int) -> float:
-    # единая формула для обоих: USDT * леверы / цена
     qty = amount * leverage / entry
-    # округление по бирже
     if exchange == "bybit":
         return round(qty, 4)
     if exchange == "bingx":
@@ -725,12 +875,10 @@ def calculate_qty(exchange: str, amount: float, entry: float, leverage: int) -> 
     return round(qty, 4)
 
 
-
 def format_price(value: float, precision: int | None = None) -> str:
-    """Форматирует цену: убирает лишние нули, сохраняет значимые знаки."""
     if precision is not None:
         return f"{value:,.{precision}f}"
-    # Автоматическое определение точности
+
     if value == 0:
         return "0"
     if value >= 1000:
@@ -738,24 +886,11 @@ def format_price(value: float, precision: int | None = None) -> str:
     elif value >= 1:
         return f"{value:,.4f}".rstrip("0").rstrip(".")
     else:
-        # Для очень маленьких цен (< 1)
         s = f"{value:.8f}".rstrip("0").rstrip(".")
         return s
 
 
-
-    """
-    amount — твоя маржа в USDT.
-    qty — размер позиции в монетах (BTC, PYTH и т.д.).
-    Формула одинаковая для Bybit и BingX.
-    """
-    return round((amount * leverage) / entry, 4)
-
 def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: float = 0.005) -> float:
-    """
-    Простейшая оценка цены ликвидации:
-    - mm — maintenance margin (0.5% по умолчанию)
-    """
     if side == "long":
         return entry * (1 - 1 / leverage + mm)
     else:
@@ -763,9 +898,6 @@ def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: fl
 
 
 def calculate_cost(exchange: str, amount: float, leverage: int | float) -> float:
-    """
-    cost — номинал позиции в USDT (position value).
-    """
     return round(amount * leverage, 2)
 
 
@@ -776,38 +908,23 @@ def calculate_pnl_linear(
     side: str,
     leverage: float,
 ) -> tuple[float, float, float]:
-    """
-    Линейные USDT‑контракты (Bybit, BingX):
-    - pnl_usd: нереализованный PnL в USDT
-    - margin: маржа под позицию (entry * qty / leverage)
-    - pnl_percent: PnL% = pnl_usd / margin * 100
-    """
     if side not in ("long", "short"):
         raise ValueError("side must be 'long' or 'short'")
 
-    # 1) PnL в USDT
     if side == "long":
         pnl_usd = qty * (mark - entry)
     else:
         pnl_usd = qty * (entry - mark)
 
-    # 2) Маржа позиции
     margin = entry * qty / leverage if leverage else 0.0
-
-    # 3) PnL% (ROI позиции)
     pnl_percent = (pnl_usd / margin * 100) if margin > 0 else 0.0
 
     return round(pnl_usd, 4), round(margin, 4), round(pnl_percent, 2)
 
 
 def calculate_pnl(entry: float, mark: float, side: str, leverage: float) -> tuple[float, float]:
-    """
-    Оставляем для совместимости (qty = 1).
-    Для реальных позиций лучше использовать calculate_pnl_linear с реальным qty.
-    """
     pnl_usd, margin, pnl_percent = calculate_pnl_linear(entry, mark, 1.0, side, leverage)
     return pnl_percent, pnl_usd
-
 
 
 # =====================================================
@@ -883,7 +1000,6 @@ async def show_step(
     }
 
     question_text = pretty_questions.get(question, f"❓ {question}")
-
     last_msg_id = data.get("last_bot_msg_id") or data.get("custom_last_msg_id")
     if last_msg_id:
         try:
@@ -914,22 +1030,20 @@ def draw_gray_box(
     padding_x = cfg.get("pad_x", 16)
     padding_y = cfg.get("pad_y", 10)
     radius = cfg.get("radius", 14)
-
     bbox = draw.textbbox((0, 0), text, font=font)
     w = bbox[2] - bbox[0]
     h = bbox[3] - bbox[1]
-
     x1 = x - w // 2 - padding_x
     y1 = y - h // 2 - padding_y
     x2 = x + w // 2 + padding_x
     y2 = y + h // 2 + padding_y
-
     draw.rounded_rectangle(
         (x1, y1, x2, y2),
         radius=radius,
         fill=(80, 80, 80),
     )
     draw.text((x, y), text, fill=(255, 255, 255), font=font, anchor="mm")
+
 
 def draw_side_badge(
     draw: ImageDraw.ImageDraw,
@@ -944,34 +1058,28 @@ def draw_side_badge(
     img_h = draw.im.size[1]
     badge_size = fonts_cfg["sizes"]["badge"]
     badge_style = fonts_cfg.get("badge_style", "outline")
-
     font = ImageFont.truetype(
         os.path.join(BASE_DIR, fonts_cfg["files"]["regular"]),
         scale_font(badge_size, img_h),
     )
 
-    # 1. Сначала ВСЕГДА считаем размер рамки
-    if exchange == "bingx" and cfg is not None:
-        # фиксированный размер рамки для обычного BingX
+    # 1. Жёсткий размер рамки, если cfg задан (Bybit/BingX)
+    if cfg is not None:
         box_w = cfg.get("w", 140)
         box_h = cfg.get("h", 48)
         radius = cfg.get("radius", 18)
-        text_offset_y = fonts_cfg["sizes"].get("badge_text_offset_y", 0)
     else:
-        # старое поведение для остальных
+        # запасной вариант, если в layout нет side_badge
         padding_x = 16
         padding_y = 18
         radius = 20
-        text_offset_y = 0
-
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
-
         box_w = text_w + padding_x * 2
         box_h = text_h + padding_y * 1.5
 
-    # 2. Теперь всегда считаем координаты рамки
+    # 2. Рамка вокруг центра (x, y)
     x1 = x - box_w // 2
     y1 = y - box_h // 2
     x2 = x1 + box_w
@@ -986,14 +1094,12 @@ def draw_side_badge(
 
     draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill_color)
 
-    # 3. Текст по центру рамки + вертикальный offset
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+    # 3. Текст строго по центру рамки
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    draw.text((center_x, center_y), text, fill=text_color, font=font, anchor="mm")
 
-    text_x = x1 + (box_w - text_w) / 2
-    text_y = y1 + (box_h - text_h) / 15 + text_offset_y
-    draw.text((text_x, text_y), text, fill=text_color, font=font)
+
 
 
 def clear_by_layout(img: Image.Image, draw: ImageDraw.ImageDraw, layout: dict, key: str):
@@ -1033,7 +1139,6 @@ def draw_bingx_icon(
     if not os.path.exists(icon_path):
         return
 
-
     icon = Image.open(icon_path).convert("RGBA")
     size = int(cfg.get("size", 24))
     icon = icon.resize((size, size), Image.LANCZOS)
@@ -1045,14 +1150,15 @@ def draw_bingx_icon(
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), symbol, font=font)
     text_width = bbox[2] - bbox[0]
-
     gap = cfg.get("gap", 8)
-    x += text_width + gap
 
+    x += text_width + gap
     img.paste(icon, (x, y), icon)
+
 
 def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
     import uuid
+
     template_path = os.path.join(BASE_DIR, "assets", data["exchange"], "template.png")
     output_dir = os.path.join(BASE_DIR, "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -1060,14 +1166,12 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 
     cfg = FONTS[data["exchange"]]
     layout = LAYOUT[data["exchange"]]
+
     font_regular = os.path.join(BASE_DIR, cfg["files"]["regular"])
     font_bold = os.path.join(BASE_DIR, cfg["files"]["bold"])
     sizes = cfg["sizes"]
 
-
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-
     img = Image.open(template_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
 
@@ -1083,7 +1187,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         "clear_margin",
         "clear_risk",
     ]
-
     for key in clear_keys:
         if data["exchange"] == "bybit" and key == "clear_margin":
             continue
@@ -1111,7 +1214,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     )
 
     w, h = img.size
-
     if data["exchange"] == "bingx":
         draw_bingx_icon(img, data["symbol"], layout, symbol_font, w, h)
 
@@ -1121,10 +1223,9 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
             int(c["y"] * h) + c.get("dy", 0),
         )
 
-    # ---- ТЕКСТЫ ----
     symbol_text = data["symbol"]
     badge_text = "Лонг" if data["side"] == "long" else "Шорт"
-    pnl_text = f"{pnl_usdt:+.2f}$ ({pnl:+.2f}%)"          # только проценты, со знаком
+    pnl_text = f"{pnl_usdt:+.2f}$ ({pnl:+.2f}%)"
     if data["exchange"] == "bybit":
         lev_text = f"Кросс {data['leverage']}x"
     else:
@@ -1135,7 +1236,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     lev_x, lev_y = pos(layout["leverage"])
     badge_x, badge_y = pos(layout["side_badge"])
 
-    # 1) Символ
     draw.text(
         (symbol_x, symbol_y),
         symbol_text,
@@ -1144,23 +1244,17 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         anchor=layout["symbol"]["anchor"],
     )
 
-    # 2) Координаты бейджа Лонг/Шорт
     if data["exchange"] == "bybit":
-        # ширина текста монеты
         sym_bbox = draw.textbbox((0, 0), symbol_text, font=symbol_font)
         sym_width = sym_bbox[2] - sym_bbox[0]
-
-        gap = 75  # фиксированное расстояние после монеты
+        gap = 75
         layout_dx = layout["side_badge"].get("dx", 0)
-
         badge_x_final = symbol_x + sym_width + gap + layout_dx
         badge_y_final = badge_y
     else:
-        # для BingX — как в layout
         badge_x_final = badge_x
         badge_y_final = badge_y
 
-    # 3) Бейдж Лонг/Шорт
     draw_side_badge(
         draw,
         badge_x_final,
@@ -1169,9 +1263,9 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         side_color,
         data["exchange"],
         cfg,
+        layout.get("side_badge"),
     )
 
-    # 4) PNL
     draw.text(
         (pnl_x, pnl_y),
         pnl_text,
@@ -1180,7 +1274,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         anchor=layout["pnl"]["anchor"],
     )
 
-    # 5) Плечо (рядом с символом)
     draw.text(
         (lev_x, lev_y),
         lev_text,
@@ -1189,16 +1282,13 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         anchor=layout["leverage"]["anchor"],
     )
 
-    # 6) Только для BINGX: отдельные плашки "Кросс" и "20x"
     if data["exchange"] == "bingx":
         badge_font = ImageFont.truetype(
             os.path.join(BASE_DIR, font_regular),
             sizes["leverage"],
         )
-
         mx, my = pos(layout["margin_mode"])
         lx, ly = pos(layout["leverage_bingx"])
-
         draw_gray_box(draw, mx, my, "Кросс", badge_font, layout["margin_mode"])
         draw_gray_box(
             draw,
@@ -1209,9 +1299,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
             layout["leverage_bingx"],
         )
 
-        
-
-    # ---- Нижняя строка ----
     if data["exchange"] == "bybit":
         qty_text = f"{data['qty']:.4f}"
     else:
@@ -1242,13 +1329,13 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         w,
         h,
     )
-    precision = data.get("price_precision")
 
+    precision = data.get("price_precision")
     draw_text(
         draw,
         layout,
         "entry",
-        format_price(data['entry'], precision),
+        format_price(data["entry"], precision),
         font_regular,
         sizes["entry"],
         WHITE,
@@ -1259,7 +1346,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         draw,
         layout,
         "mark",
-        format_price(data['mark'], precision),
+        format_price(data["mark"], precision),
         font_regular,
         sizes["mark"],
         WHITE,
@@ -1270,7 +1357,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         draw,
         layout,
         "liq",
-        format_price(data['liquidation'], precision),
+        format_price(data["liquidation"], precision),
         font_regular,
         sizes["liq"],
         ORANGE,
@@ -1280,15 +1367,15 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 
     if data["exchange"] == "bingx" and "risk" in layout:
         entry = float(data.get("entry") or 0)
-        qty = float(data.get("qty") or 0)
-        margin = float(data.get("amount") or 0)
+        qty_val = float(data.get("qty") or 0)
+        margin_val = float(data.get("amount") or 0)
+        position_margin = entry * qty_val
 
-        position_margin = entry * qty
-        if position_margin == 0 or margin == 0:
+        if position_margin == 0 or margin_val == 0:
             risk_text = "--"
             risk_value = None
         else:
-            risk = margin / position_margin * 100.0
+            risk = margin_val / position_margin * 100.0
             if round(risk, 2) == 0:
                 risk_text = "--"
                 risk_value = None
@@ -1302,15 +1389,14 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
             sizes["leverage"],
         )
 
-        # выбор цвета по порогам
         if risk_value is None:
-            risk_color = ORANGE      # например, когда "--"
+            risk_color = ORANGE
         elif risk_value <= 40:
-            risk_color = GREEN     # до 40% зелёный
+            risk_color = GREEN
         elif risk_value <= 70:
-            risk_color = ORANGE    # 40–70% жёлтый/оранжевый
+            risk_color = ORANGE
         else:
-            risk_color = RED       # выше 70% красный
+            risk_color = RED
 
         draw.text(
             (rx, ry),
@@ -1320,13 +1406,14 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
             anchor=layout["risk"]["anchor"],
         )
 
-
-
     img.save(output_path)
-    # Очистка старых временных файлов (старше 1 часа)
     _cleanup_old_files(os.path.dirname(output_path), prefix="result_")
     return output_path
 
+
+# =====================================================
+# КАСТОМНЫЕ КАРТИНКИ (Bybit / BingX)
+# =====================================================
 
 def draw_custom_bingx_lines(
     img: Image.Image,
@@ -1353,7 +1440,6 @@ def draw_custom_bingx_lines(
     base_x = int(cfg["x"] * w + cfg.get("dx", 0))
     base_y = int(cfg["y"] * h + cfg.get("dy", 0))
 
-    # ширина символа, чтобы сдвинуть линии
     dummy = Image.new("RGBA", (10, 10))
     d = ImageDraw.Draw(dummy)
     bbox_sym = d.textbbox((0, 0), symbol, font=font_symbol)
@@ -1371,14 +1457,11 @@ def draw_custom_bingx_lines(
 
     draw = ImageDraw.Draw(img)
 
-    # позиция текста side по layout["side_position"]
     side_cfg = layout.get("side_position", {})
     side_x = int(side_cfg.get("x", 0.5) * w)
     side_y = int(side_cfg.get("y", 0.335) * h)
-
     side_text = "Long" if data.get("side") == "long" else "Short"
     side_color = (0, 200, 120) if data.get("side") == "long" else (230, 60, 60)
-
     draw.text(
         (side_x, side_y),
         side_text,
@@ -1387,15 +1470,12 @@ def draw_custom_bingx_lines(
         anchor=side_cfg.get("anchor", "lm"),
     )
 
-    # позиция текста плеча по layout["leverage_position"]
     lev_cfg = layout.get("leverage_position", {})
     lev_x = int(lev_cfg.get("x", 0.15) * w)
     lev_y = int(lev_cfg.get("y", 0.335) * h)
-
     lev_raw = str(data.get("leverage", ""))
     lev_num = lev_raw.replace("x", "").upper()
     lev_text = f"{lev_num}X" if lev_num else ""
-
     if lev_text:
         draw.text(
             (lev_x, lev_y),
@@ -1405,13 +1485,6 @@ def draw_custom_bingx_lines(
             anchor=lev_cfg.get("anchor", "lm"),
         )
 
-
-
-
-
-# =====================================================
-# КАСТОМ BYBIT
-# =====================================================
 
 def generate_custom_bybit_image(data: dict) -> str:
     pnl_raw = data["pnl"]
@@ -1427,7 +1500,6 @@ def generate_custom_bybit_image(data: dict) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"custom_bybit_{uuid.uuid4().hex[:8]}.png")
 
-
     img = Image.open(template_path).convert("RGBA")
     w, h = img.size
     draw = ImageDraw.Draw(img)
@@ -1435,7 +1507,6 @@ def generate_custom_bybit_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # ---- ИКОНКА РЯДОМ С СИМВОЛОМ ----
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
     if os.path.exists(icon_path) and cfg_icon:
@@ -1446,7 +1517,6 @@ def generate_custom_bybit_image(data: dict) -> str:
         y = int(cfg_icon["y"] * h) + cfg_icon.get("dy", 0)
         img.paste(icon, (x, y), icon)
         draw = ImageDraw.Draw(img)
-    # -------------------------------
 
     username_font = ImageFont.truetype(
         os.path.join(BASE_DIR, cfg["files"]["regular"]),
@@ -1456,15 +1526,16 @@ def generate_custom_bybit_image(data: dict) -> str:
         os.path.join(BASE_DIR, cfg["files"]["bold"]),
         cfg["sizes"]["symbol"],
     )
-
     pnl_value = float(str(data["pnl"]).replace("%", ""))
     if abs(pnl_value) > 99:
         pnl_font = ImageFont.truetype(
-            os.path.join(BASE_DIR, cfg["files"]["bold"]), 80
+            os.path.join(BASE_DIR, cfg["files"]["bold"]),
+            80,
         )
     elif abs(pnl_value) > 49:
         pnl_font = ImageFont.truetype(
-            os.path.join(BASE_DIR, cfg["files"]["bold"]), 100
+            os.path.join(BASE_DIR, cfg["files"]["bold"]),
+            100,
         )
     else:
         pnl_font = ImageFont.truetype(
@@ -1514,11 +1585,11 @@ def generate_custom_bybit_image(data: dict) -> str:
 
     if "entry" in layout:
         entry_pos = pos(layout["entry"])
-        draw.text(entry_pos, format_price(data['entry']), fill=WHITE, font=entry_font, anchor="lm")
+        draw.text(entry_pos, format_price(data["entry"]), fill=WHITE, font=entry_font, anchor="lm")
 
     if "exit" in layout:
         exit_pos = pos(layout["exit"])
-        draw.text(exit_pos, format_price(data['exit']), fill=WHITE, font=exit_font, anchor="lm")
+        draw.text(exit_pos, format_price(data["exit"]), fill=WHITE, font=exit_font, anchor="lm")
 
     if "cross_leverage" in layout:
         direction_text = "Лонг" if data["side"] == "long" else "Шорт"
@@ -1557,9 +1628,6 @@ def generate_custom_bybit_image(data: dict) -> str:
     return output_path
 
 
-# =====================================================
-# КАСТОМ BINGX
-# =====================================================
 def generate_custom_bingx_image(data: dict) -> str:
     pnl_raw = data["pnl"]
     try:
@@ -1574,14 +1642,13 @@ def generate_custom_bingx_image(data: dict) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"custom_bingx_{uuid.uuid4().hex[:8]}.png")
 
-
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Создай {template_path}")
 
     img = Image.open(template_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
-
     w, h = img.size
+
     cfg = FONTS["custom_bingx"]
     layout = BYBIT_CUSTOM_LAYOUT["bingx"]
 
@@ -1616,7 +1683,6 @@ def generate_custom_bingx_image(data: dict) -> str:
 
     draw_custom_bingx_lines(img, data, layout, small_font, symbol_font, w, h)
 
-
     WHITE = (255, 255, 255)
     GREEN = (0, 200, 120)
     RED = (230, 60, 60)
@@ -1637,21 +1703,18 @@ def generate_custom_bingx_image(data: dict) -> str:
         draw.text(pos(layout["pnl"]), pnl_text, fill=pnl_color, font=pnl_font)
 
     if "entry" in layout:
-        draw.text(pos(layout["entry"]), format_price(data['entry']), fill=WHITE, font=entry_font)
+        draw.text(pos(layout["entry"]), format_price(data["entry"]), fill=WHITE, font=entry_font)
 
     if "exit" in layout:
-        draw.text(pos(layout["exit"]), format_price(data['exit']), fill=WHITE, font=exit_font)
+        draw.text(pos(layout["exit"]), format_price(data["exit"]), fill=WHITE, font=exit_font)
 
-    # дата/время и рефкод по layout'у
     datetime_text = data.get("datetime_str", "").strip()
     referral_code = data.get("referral", "").strip()
 
-    # дата/время — через layout["datetime"]
     if datetime_text and "datetime" in layout:
         dt_pos = pos(layout["datetime"])
         draw.text(dt_pos, datetime_text, fill=GRAY, font=small_font)
 
-    # реферальный код — через layout["referral"]
     if referral_code and "referral" in layout:
         ref_pos = pos(layout["referral"])
         draw.text(ref_pos, referral_code, fill=WHITE, font=small_font)
@@ -1661,15 +1724,14 @@ def generate_custom_bingx_image(data: dict) -> str:
     return output_path
 
 
-
 # =====================================================
 # CUSTOM EXCHANGE (FSM)
 # =====================================================
+
 @dp.callback_query(F.data == "custom_bybit")
 async def start_custom_bybit(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(exchange="bybit")
-    # первое меню
     msg = await cb.message.answer("👤 Введите имя пользователя:")
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
@@ -1682,6 +1744,7 @@ async def start_custom_bingx(cb: CallbackQuery, state: FSMContext):
     msg = await cb.message.answer("👤 Введите имя пользователя:")
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
+
 
 @dp.callback_query(CustomExchange.side)
 async def custom_side(call: CallbackQuery, state: FSMContext):
@@ -1709,6 +1772,7 @@ async def custom_side(call: CallbackQuery, state: FSMContext):
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.symbol)
 
+
 @dp.message(CustomExchange.username)
 async def custom_username(msg: Message, state: FSMContext):
     await state.update_data(username=msg.text.strip())
@@ -1723,13 +1787,13 @@ async def custom_username(msg: Message, state: FSMContext):
         except Exception:
             pass
 
-    # сначала спрашиваем направление сделки
     new = await msg.answer(
         f"{summary}\n📈 Выбери направление сделки:",
         reply_markup=side_kb,
     )
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.side)
+
 
 @dp.message(CustomExchange.symbol)
 async def custom_symbol(msg: Message, state: FSMContext):
@@ -1744,7 +1808,10 @@ async def custom_symbol(msg: Message, state: FSMContext):
             await msg.bot.delete_message(msg.chat.id, last_id)
         except Exception:
             pass
-    new = await msg.answer(f"{summary}\nЦена входа(Через точку)""\nНапример:123456.12):\n")
+
+    new = await msg.answer(
+        f"{summary}\nЦена входа(Через точку)\nНапример:123456.12):\n"
+    )
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.entry)
 
@@ -1754,6 +1821,7 @@ async def custom_entry(msg: Message, state: FSMContext):
     value = await parse_float(msg)
     if value is None:
         return
+
     await state.update_data(entry=value)
     await safe_delete_message(msg)
 
@@ -1765,7 +1833,10 @@ async def custom_entry(msg: Message, state: FSMContext):
             await msg.bot.delete_message(msg.chat.id, last_id)
         except Exception:
             pass
-    new = await msg.answer(f"{summary}\nЦена выхода(Через Точку)""\nНапример:123456.12):\n")
+
+    new = await msg.answer(
+        f"{summary}\nЦена выхода(Через Точку)\nНапример:123456.12):\n"
+    )
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.exit_price)
 
@@ -1775,6 +1846,7 @@ async def custom_exit(msg: Message, state: FSMContext):
     value = await parse_float(msg)
     if value is None:
         return
+
     await state.update_data(exit=value)
     await safe_delete_message(msg)
 
@@ -1786,9 +1858,11 @@ async def custom_exit(msg: Message, state: FSMContext):
             await msg.bot.delete_message(msg.chat.id, last_id)
         except Exception:
             pass
+
     new = await msg.answer(f"{summary}\nПлечо (например 20):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.leverage)
+
 
 @dp.message(CustomExchange.leverage)
 async def custom_leverage(msg: Message, state: FSMContext):
@@ -1811,10 +1885,12 @@ async def custom_leverage(msg: Message, state: FSMContext):
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.referral)
 
+
 @dp.callback_query(CustomExchange.referral, F.data == "skip_field")
 async def skip_referral(call: CallbackQuery, state: FSMContext):
-    await state.update_data(referral="")      # пустой рефкод
+    await state.update_data(referral="")
     await call.answer()
+
     try:
         await call.message.delete()
     except Exception:
@@ -1850,17 +1926,18 @@ async def custom_referral(msg: Message, state: FSMContext):
     )
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.datetime_str)
-    
+
+
 @dp.callback_query(CustomExchange.datetime_str, F.data == "skip_field")
 async def skip_datetime(call: CallbackQuery, state: FSMContext):
     await state.update_data(datetime_str="")
     await call.answer()
+
     try:
         await call.message.delete()
     except Exception:
         pass
 
-    # вызываем финальный шаг вручную
     msg = call.message
     await custom_finish(msg, state)
 
@@ -1870,7 +1947,7 @@ async def custom_finish(msg: Message, state: FSMContext):
     text_input = getattr(msg, "text", None)
     if text_input:
         await state.update_data(datetime_str=text_input.strip())
-    await safe_delete_message(msg)
+        await safe_delete_message(msg)
 
     data = await state.get_data()
     exchange = data.get("exchange", "bybit")
@@ -1878,6 +1955,7 @@ async def custom_finish(msg: Message, state: FSMContext):
     exit_price = data["exit"]
     side = data["side"]
     leverage_raw = data["leverage"].strip().lower().replace("x", "")
+
     try:
         leverage = float(leverage_raw)
     except ValueError:
@@ -1900,13 +1978,11 @@ async def custom_finish(msg: Message, state: FSMContext):
     }
 
     if exchange == "bingx":
-        # для кастомного BingX — отрисовываем ровно то плечо, которое ввёл пользователь
-        image_data["leverage"] = data["leverage"]          # например "20x"
+        image_data["leverage"] = data["leverage"]
         image_data["referral"] = data.get("referral", "")
         image_data["datetime_str"] = data.get("datetime_str", "")
         path = generate_custom_bingx_image(image_data)
     else:
-        # для кастомного Bybit оставляем форматирование 20.0x
         image_data["leverage"] = leverage_formatted
         path = generate_custom_bybit_image(image_data)
 
@@ -1921,7 +1997,6 @@ async def custom_finish(msg: Message, state: FSMContext):
     await state.clear()
 
 
-
 # =====================================================
 # ЗАПУСК
 # =====================================================
@@ -1932,4 +2007,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
