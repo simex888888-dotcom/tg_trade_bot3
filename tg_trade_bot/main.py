@@ -1060,9 +1060,10 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 
     cfg = FONTS[data["exchange"]]
     layout = LAYOUT[data["exchange"]]
-    font_regular = cfg["files"]["regular"]
-    font_bold = cfg["files"]["bold"]
+    font_regular = os.path.join(BASE_DIR, cfg["files"]["regular"])
+    font_bold = os.path.join(BASE_DIR, cfg["files"]["bold"])
     sizes = cfg["sizes"]
+
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
