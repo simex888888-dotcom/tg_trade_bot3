@@ -2,4 +2,4 @@ aiogram
 Pillow
 python-dotenv
 aiohttp
-request
+requests
