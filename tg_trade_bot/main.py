@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+import uuid
 import requests
 
 from aiogram import Bot, Dispatcher, F
@@ -96,8 +98,6 @@ async def safe_delete_message(message: Message) -> None:
 
 def _cleanup_old_files(directory: str, prefix: str, max_age_seconds: int = 3600) -> None:
     """Удаляет временные файлы старше max_age_seconds секунд."""
-    import time
-
     try:
         now = time.time()
         for fname in os.listdir(directory):
@@ -191,24 +191,24 @@ async def test_bybit(message: Message):
     entry = 42000
     mark = 43250
     leverage = 20
+    side = "long"
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
-    side = "long"
-    percent, pnl = calculate_pnl(entry, mark, side, leverage)
-    pnl_usdt = round(cost * pnl / 100, 2)
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(entry, mark, qty, side, leverage)
+    pnl = percent
 
     fake_data = {
         "exchange": exchange,
         "symbol": "BTCUSDT",
-        "side": "long",
+        "side": side,
         "entry": entry,
         "mark": mark,
         "amount": amount,
         "deposit": 5000,
         "leverage": leverage,
         "qty": qty,
-        "liquidation": calculate_liquidation(entry, leverage, "long"),
+        "liquidation": calculate_liquidation(entry, leverage, side),
         "cost": cost,
     }
 
@@ -396,7 +396,7 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
     user_id = message.from_user.id
     marathon = MARATHON.get(user_id)
     if marathon is not None:
-        marathon["balance"] += pnl_usdt
+        marathon["balance"] += round(pnl_usdt, 2)
         start = marathon["start"]
         balance = marathon["balance"]
         pnl_total = balance - start
@@ -1160,8 +1160,6 @@ def draw_bingx_icon(
 
 
 def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
-    import uuid
-
     template_path = os.path.join(BASE_DIR, "assets", data["exchange"], "template.png")
     output_dir = os.path.join(BASE_DIR, "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -1174,7 +1172,6 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     font_bold = os.path.join(BASE_DIR, cfg["files"]["bold"])
     sizes = cfg["sizes"]
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     img = Image.open(template_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
 
@@ -1203,18 +1200,9 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     side_color = GREEN if data["side"] == "long" else RED
     pnl_color = GREEN if pnl >= 0 else RED
 
-    symbol_font = ImageFont.truetype(
-        os.path.join(BASE_DIR, font_bold),
-        sizes["symbol"],
-    )
-    pnl_font = ImageFont.truetype(
-        os.path.join(BASE_DIR, font_bold),
-        sizes["pnl"],
-    )
-    lev_font = ImageFont.truetype(
-        os.path.join(BASE_DIR, font_regular),
-        sizes["leverage"],
-    )
+    symbol_font = ImageFont.truetype(font_bold,    sizes["symbol"])
+    pnl_font    = ImageFont.truetype(font_bold,    sizes["pnl"])
+    lev_font    = ImageFont.truetype(font_regular, sizes["leverage"])
 
     w, h = img.size
     if data["exchange"] == "bingx":
@@ -1286,10 +1274,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     )
 
     if data["exchange"] == "bingx":
-        badge_font = ImageFont.truetype(
-            os.path.join(BASE_DIR, font_regular),
-            sizes["leverage"],
-        )
+        badge_font = ImageFont.truetype(font_regular, sizes["leverage"])
         mx, my = pos(layout["margin_mode"])
         lx, ly = pos(layout["leverage_bingx"])
         draw_gray_box(draw, mx, my, "Кросс", badge_font, layout["margin_mode"])
@@ -1387,10 +1372,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
                 risk_value = risk
 
         rx, ry = pos(layout["risk"])
-        risk_font = ImageFont.truetype(
-            os.path.join(BASE_DIR, font_regular),
-            sizes["leverage"],
-        )
+        risk_font = ImageFont.truetype(font_regular, sizes["leverage"])
 
         if risk_value is None:
             risk_color = ORANGE
@@ -1496,7 +1478,6 @@ def generate_custom_bybit_image(data: dict) -> str:
     except ValueError:
         pnl = 0.0
 
-    import uuid
     template_side = "long" if pnl >= 0 else "short"
     template_path = os.path.join(BASE_DIR, "assets", "bybit", f"screenshot_{template_side}.png")
     output_dir = os.path.join(BASE_DIR, "images")
@@ -1529,13 +1510,13 @@ def generate_custom_bybit_image(data: dict) -> str:
         os.path.join(BASE_DIR, cfg["files"]["bold"]),
         cfg["sizes"]["symbol"],
     )
-    pnl_value = float(str(data["pnl"]).replace("%", ""))
-    if abs(pnl_value) > 99:
+    pnl_abs = abs(pnl)
+    if pnl_abs > 99:
         pnl_font = ImageFont.truetype(
             os.path.join(BASE_DIR, cfg["files"]["bold"]),
             80,
         )
-    elif abs(pnl_value) > 49:
+    elif pnl_abs > 49:
         pnl_font = ImageFont.truetype(
             os.path.join(BASE_DIR, cfg["files"]["bold"]),
             100,
@@ -1583,7 +1564,7 @@ def generate_custom_bybit_image(data: dict) -> str:
     if "pnl" in layout:
         pnl_pos = pos(layout["pnl"])
         pnl_text = f"{pnl:+.2f}%"
-        pnl_color = (0, 200, 100) if pnl >= 0 else (230, 60, 50)
+        pnl_color = (0, 200, 120) if pnl >= 0 else (230, 60, 60)
         draw.text(pnl_pos, pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
     if "entry" in layout:
@@ -1623,7 +1604,7 @@ def generate_custom_bybit_image(data: dict) -> str:
         img = Image.alpha_composite(img, overlay)
         draw = ImageDraw.Draw(img)
 
-        text_color = (0, 200, 100) if data["side"] == "long" else (230, 50, 60)
+        text_color = (0, 200, 120) if data["side"] == "long" else (230, 60, 60)
         draw.text(lev_pos, lev_text, fill=text_color, font=lev_font, anchor="mm")
 
     img.save(output_path)
@@ -1638,7 +1619,6 @@ def generate_custom_bingx_image(data: dict) -> str:
     except ValueError:
         pnl = 0.0
 
-    import uuid
     template_side = "long" if pnl >= 0 else "short"
     template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
     output_dir = os.path.join(BASE_DIR, "images")
@@ -1957,10 +1937,10 @@ async def custom_finish(msg: Message, state: FSMContext):
     entry = data["entry"]
     exit_price = data["exit"]
     side = data["side"]
-    leverage_raw = data["leverage"].strip().lower().replace("x", "")
+    leverage_raw = str(data.get("leverage") or "1").strip().lower().replace("x", "")
 
     try:
-        leverage = float(leverage_raw)
+        leverage = float(leverage_raw) if leverage_raw else 1.0
     except ValueError:
         leverage = 1.0
 
