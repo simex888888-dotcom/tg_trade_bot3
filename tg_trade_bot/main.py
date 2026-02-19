@@ -1066,16 +1066,16 @@ def draw_side_badge(
         scale_font(badge_size, img_h),
     )
 
-    # 1. Жёсткий размер рамки, если cfg задан (Bybit/BingX)
-    if cfg is not None:
+    # 1. Жёсткий размер рамки только для BingX (берём w/h из layout)
+    if exchange == "bingx" and cfg is not None:
         box_w = cfg.get("w", 140)
         box_h = cfg.get("h", 48)
         radius = cfg.get("radius", 18)
     else:
-        # запасной вариант, если в layout нет side_badge
+        # Для Bybit и остальных — размер считается от текста автоматически
         padding_x = 16
         padding_y = 18
-        radius = 20
+        radius = cfg.get("radius", 20) if cfg is not None else 20
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
