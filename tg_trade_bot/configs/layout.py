@@ -29,7 +29,7 @@ LAYOUT = {
         # --- Обычный скрин ---
         "symbol":    {"x": 0.055, "y": 0.12, "anchor": "lm", "dx": 0, "dy": 0},
         "leverage":  {"x": 0.30,  "y": 0.20, "anchor": "lm"},
-        "side_badge":{"x": 0.10,  "y": 0.19, "anchor": "lm", "dx": 0, "dy": 8, "w": 150, "h": 700, "radius": 14},
+        "side_badge":{"x": 0.10,  "y": 0.19, "anchor": "lm", "dx": 0, "dy": 8, "w": 150, "h": 150, "radius": 14},
         "pnl":       {"x": 0.98,  "y": 0.20, "anchor": "rm", "dx": 0, "dy": 0},
 
         # Иконка монеты
