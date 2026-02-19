@@ -933,9 +933,9 @@ def draw_side_badge(
         scale_font(badge_size, img_h),
     )
     if exchange == "bingx" and cfg is not None:
-        box_w = cfg.get("w", 140)
-        box_h = cfg.get("h", 48)
-        radius = cfg.get("radius", 18)
+        box_w = cfg.get("w", 150)
+        box_h = cfg.get("h", 70)
+        radius = cfg.get("radius", 14)
     else:
         padding_x = 16
         padding_y = 18
